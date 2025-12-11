@@ -1,0 +1,87 @@
+name: "[MC][Tool]ecs-start-scheduler"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environments:
+        type: string
+        required: false
+        description: "カンマ区切りで環境指定 (空の場合はVariablesを使用)"
+        default: ""
+  schedule:
+    - cron: '30 14 * * *' # 23:30
+    - cron: '45 23 * * 5,6' # 土日の8:45 JST (UTC 金土23:45)
+    - cron: '45 8 * * 6,0' # 土日の17:45 JST (UTC 土日08:45)
+
+jobs:
+  parse-environments:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      should_run: ${{ steps.parse.outputs.should_run }}
+    steps:
+      - name: Parse environments to matrix
+        id: parse
+        run: |
+          # 手動入力があればそれを使用、なければVariablesを使用
+          if [ -n "${{ inputs.environments }}" ]; then
+            ENVS="${{ inputs.environments }}"
+            echo "Using manual input: $ENVS"
+          else
+            ENVS="${{ vars.ECS_START_STOP_SCHEDULER_ENVS }}"
+            echo "Using Variables: $ENVS"
+          fi
+
+          # 空チェック
+          if [ -z "$ENVS" ]; then
+            echo "No environments configured. Skipping."
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # カンマ区切りをJSON配列に変換 (スペース除去、大文字化)
+          MATRIX=$(echo "$ENVS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr 'a-z' 'A-Z' | grep -v '^$' | jq -R . | jq -s -c .)
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "Parsed environments: $MATRIX"
+
+  start-ecs:
+    needs: parse-environments
+    if: needs.parse-environments.outputs.should_run == 'true'
+    runs-on: arm-ubuntu-latest-4
+    strategy:
+      matrix:
+        target: ${{ fromJson(needs.parse-environments.outputs.matrix) }}
+      fail-fast: true
+      max-parallel: 1
+
+    environment: ${{ matrix.target }}
+
+    steps:
+      - name: Setup environment
+        run: |
+          ENV_NAME=${{ matrix.target }}
+          ENV_NAME_LOWER_CASE=$(echo ${ENV_NAME} | tr 'A-Z' 'a-z')
+          echo "ECS_SERVICES=${ENV_NAME_LOWER_CASE}-goku-core-service,${ENV_NAME_LOWER_CASE}-goku-conversion-service,${ENV_NAME_LOWER_CASE}-goku-dealer-service,${ENV_NAME_LOWER_CASE}-goku-price-service" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=${ENV_NAME_LOWER_CASE}-goku-cluster" >> $GITHUB_ENV
+          echo "ENV_NAME=${ENV_NAME}" >> $GITHUB_ENV
+
+      # TODO: テスト完了後にコメントアウトを解除すること
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v4.0.2
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ap-northeast-1
+
+      - name: Start ECS services (DRY-RUN)
+        run: |
+          echo "=== DRY-RUN MODE ==="
+          IFS=',' read -ra SERVICES <<< "${{ env.ECS_SERVICES }}"
+          for SERVICE in "${SERVICES[@]}"; do
+            echo "[DRY-RUN] Would start ECS Service: $SERVICE in Cluster: ${{ env.ECS_CLUSTER }}"
+            # aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service $SERVICE --desired-count 1 > /dev/null
+          done
+          echo "[DRY-RUN] Would have started all services for ${{ env.ENV_NAME }}"
+          echo "=== DRY-RUN COMPLETE ==="
