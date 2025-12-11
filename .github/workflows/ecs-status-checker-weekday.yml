@@ -2,6 +2,12 @@ name: "[MC][Tool]ecs-status-checker-weekday"
 
 on:
   workflow_dispatch:
+    inputs:
+      environments:
+        type: string
+        required: false
+        description: "カンマ区切りで環境指定 (空の場合はVariablesを使用)"
+        default: ""
   schedule:
     - cron: '00 23 * * 0-4'  # 月-金 08:00 JST
 
@@ -9,6 +15,6 @@ jobs:
   call-checker:
     uses: ./.github/workflows/ecs-status-checker-callee.yml
     with:
-      targets: ${{ vars.ECS_STATUS_CHECKER_WEEKDAY_ENVS }}
+      targets: ${{ inputs.environments != '' && inputs.environments || vars.ECS_STATUS_CHECKER_WEEKDAY_ENVS }}
       trigger_source: 'weekday'
     secrets: inherit
