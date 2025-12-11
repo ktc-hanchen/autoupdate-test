@@ -1,0 +1,14 @@
+name: "[MC][Tool]ecs-status-checker-weekend"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '00 23 * * 5,6'  # 土日 08:00 JST
+
+jobs:
+  call-checker:
+    uses: ./.github/workflows/ecs-status-checker-callee.yml
+    with:
+      targets: ${{ vars.ECS_STATUS_CHECKER_WEEKEND_ENVS }}
+      trigger_source: 'weekend'
+    secrets: inherit

@@ -1,0 +1,109 @@
+name: "[MC][CMN]ecs-status-checker-callee"
+
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: '対象環境 (カンマ区切り: DEV,STG3)'
+        required: true
+        type: string
+      trigger_source:
+        description: '呼び出し元の識別子'
+        required: false
+        type: string
+        default: 'manual'
+
+jobs:
+  parse-targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      should_run: ${{ steps.parse.outputs.should_run }}
+    steps:
+      - name: Parse targets to matrix
+        id: parse
+        run: |
+          TARGETS="${{ inputs.targets }}"
+          echo "Input targets: $TARGETS"
+
+          # 空チェック
+          if [ -z "$TARGETS" ]; then
+            echo "No targets configured. Skipping."
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "matrix=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # カンマ区切りをJSON配列に変換 (スペース除去、大文字化)
+          MATRIX=$(echo "$TARGETS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr 'a-z' 'A-Z' | grep -v '^$' | jq -R . | jq -s -c .)
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "Parsed targets: $MATRIX"
+
+  check-services:
+    needs: parse-targets
+    if: needs.parse-targets.outputs.should_run == 'true'
+    runs-on: arm-ubuntu-latest-4
+    strategy:
+      matrix:
+        target: ${{ fromJson(needs.parse-targets.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 1
+
+    environment: ${{ matrix.target }}
+
+    steps:
+      - name: Setup environment
+        run: |
+          ENV_NAME=${{ matrix.target }}
+          ENV_NAME_LOWER_CASE=$(echo ${ENV_NAME} | tr 'A-Z' 'a-z')
+          echo "ECS_SERVICES=${ENV_NAME_LOWER_CASE}-goku-core-service,${ENV_NAME_LOWER_CASE}-goku-conversion-service,${ENV_NAME_LOWER_CASE}-goku-dealer-service,${ENV_NAME_LOWER_CASE}-goku-price-service" >> $GITHUB_ENV
+          echo "ECS_CLUSTER=${ENV_NAME_LOWER_CASE}-goku-cluster" >> $GITHUB_ENV
+          echo "ENV_NAME=${ENV_NAME}" >> $GITHUB_ENV
+          echo "STOPPED_SERVICES=" >> $GITHUB_ENV
+          echo "TRIGGER_SOURCE=${{ inputs.trigger_source }}" >> $GITHUB_ENV
+
+      # TODO: テスト完了後にコメントアウトを解除すること
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v4.0.2
+      #   with:
+      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region: ap-northeast-1
+
+      - name: Check and start ECS services (DRY-RUN)
+        run: |
+          echo "=== DRY-RUN MODE ==="
+          IFS=',' read -ra SERVICES <<< "${{ env.ECS_SERVICES }}"
+          for SERVICE in "${SERVICES[@]}"; do
+            echo "[DRY-RUN] Would check ECS Service: $SERVICE in Cluster: ${{ env.ECS_CLUSTER }}"
+            # TASKS=$(aws ecs list-tasks --cluster ${{ env.ECS_CLUSTER }} --service-name $SERVICE --desired-status RUNNING --query 'taskArns' --output text)
+            # if [ -z "$TASKS" ]; then
+            #   echo "there are no running tasks under $SERVICE"
+            #   echo "Starting ECS Service: $SERVICE in Cluster: ${{ env.ECS_CLUSTER }}"
+            #   aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service $SERVICE --desired-count 1 > /dev/null
+            #   aws ecs wait services-stable --cluster ${{ env.ECS_CLUSTER }} --services $SERVICE
+            #   echo "Service $SERVICE started."
+            #   echo "isRebooted=true" >> $GITHUB_ENV
+            #   stopped_services="$stopped_services,$SERVICE"
+            # else
+            #   echo "No stopped tasks."
+            # fi
+          done
+          echo "=== DRY-RUN COMPLETE ==="
+          # echo "STOPPED_SERVICES=$stopped_services" >> $GITHUB_ENV
+
+      # - name: Notify Slack if rebooted
+      #   if: env.isRebooted == 'true'
+      #   uses: kinto-dev/goku-dev-ops/.github/actions/deploy-notify-slack@main
+      #   with:
+      #     slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
+      #     channel-id: ${{ vars.SLACK_NOTIFY_CHANNEL }}
+      #     status: started
+      #     message: "*[${{ matrix.target }}][${{ env.TRIGGER_SOURCE }}]* ${{ env.STOPPED_SERVICES }}が再起動されました。"
+      #     fields: |
+      #       {
+      #         "title": "Status",
+      #         "short": true,
+      #         "value": "Finished\n"
+      #       }
